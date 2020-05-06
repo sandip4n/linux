@@ -3268,6 +3268,7 @@ static inline void zone_statistics(struct zone *preferred_zone, struct zone *z)
 }
 
 /* Remove page from the per-cpu list, caller must protect the list */
+__attribute__ ((__noinline__))  __attribute__ ((optimize(0)))
 static struct page *__rmqueue_pcplist(struct zone *zone, int migratetype,
 			unsigned int alloc_flags,
 			struct per_cpu_pages *pcp,
@@ -3293,6 +3294,7 @@ static struct page *__rmqueue_pcplist(struct zone *zone, int migratetype,
 }
 
 /* Lock and remove page from the per-cpu list */
+__attribute__ ((__noinline__))  __attribute__ ((optimize(0)))
 static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 			struct zone *zone, gfp_t gfp_flags,
 			int migratetype, unsigned int alloc_flags)
@@ -4458,7 +4460,8 @@ check_retry_cpuset(int cpuset_mems_cookie, struct alloc_context *ac)
 	return false;
 }
 
-static inline struct page *
+__attribute__ ((__noinline__))  __attribute__ ((optimize(0)))
+static struct page *
 __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 						struct alloc_context *ac)
 {
@@ -4768,6 +4771,7 @@ static inline void finalise_ac(gfp_t gfp_mask, struct alloc_context *ac)
 /*
  * This is the 'heart' of the zoned buddy allocator.
  */
+__attribute__ ((__noinline__))  __attribute__ ((optimize(0)))
 struct page *
 __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order, int preferred_nid,
 							nodemask_t *nodemask)
@@ -5652,6 +5656,17 @@ static void build_zonelists_in_node_order(pg_data_t *pgdat, int *node_order,
 	}
 	zonerefs->zone = NULL;
 	zonerefs->zone_idx = 0;
+
+	zonerefs = pgdat->node_zonelists[ZONELIST_FALLBACK]._zonerefs;
+	if (!zonerefs->zone) {
+		pr_info("%s(): for node %d, pgdat->node_zonelists[ZONELIST_FALLBACK] is empty\n",
+			__func__, pgdat->node_id);
+		return;
+	}
+
+	for (i = 0; zonerefs[i].zone != NULL; i++)
+		pr_info("%s(): for node %d, pgdat->node_zonelists[ZONELIST_FALLBACK] has zone %s of node %d\n",
+			__func__, pgdat->node_id, zonerefs[i].zone->name, zonerefs[i].zone->node);
 }
 
 /*
@@ -5661,12 +5676,24 @@ static void build_thisnode_zonelists(pg_data_t *pgdat)
 {
 	struct zoneref *zonerefs;
 	int nr_zones;
+	int i;
 
 	zonerefs = pgdat->node_zonelists[ZONELIST_NOFALLBACK]._zonerefs;
 	nr_zones = build_zonerefs_node(pgdat, zonerefs);
 	zonerefs += nr_zones;
 	zonerefs->zone = NULL;
 	zonerefs->zone_idx = 0;
+
+	zonerefs = pgdat->node_zonelists[ZONELIST_NOFALLBACK]._zonerefs;
+	if (!zonerefs->zone) {
+		pr_info("%s(): for node %d, pgdat->node_zonelists[ZONELIST_NOFALLBACK] is empty\n",
+			__func__, pgdat->node_id);
+		return;
+	}
+
+	for (i = 0; i < nr_zones && zonerefs[i].zone != NULL; i++)
+		pr_info("%s(): for node %d, pgdat->node_zonelists[ZONELIST_NOFALLBACK] has zone %s of node %d\n",
+			__func__, pgdat->node_id, zonerefs[i].zone->name, zonerefs[i].zone->node);
 }
 
 /*

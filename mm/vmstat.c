@@ -936,6 +936,7 @@ void drain_zonestat(struct zone *zone, struct per_cpu_pageset *pset)
 #endif
 
 #ifdef CONFIG_NUMA
+__attribute__ ((__noinline__))  __attribute__ ((optimize(0)))
 void __inc_numa_state(struct zone *zone,
 				 enum numa_stat_item item)
 {
