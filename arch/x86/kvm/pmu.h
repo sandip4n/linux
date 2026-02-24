@@ -242,6 +242,12 @@ static inline bool kvm_pmu_is_fastpath_emulation_allowed(struct kvm_vcpu *vcpu)
 				  X86_PMC_IDX_MAX);
 }
 
+static inline bool pmc_needs_perf_event(struct kvm_pmc *pmc)
+{
+	return !pmc_is_gp(pmc) ||
+	       (pmc->eventsel_hw & ARCH_PERFMON_EVENTSEL_ENABLE);
+}
+
 void kvm_pmu_deliver_pmi(struct kvm_vcpu *vcpu);
 void kvm_pmu_handle_event(struct kvm_vcpu *vcpu);
 int kvm_pmu_rdpmc(struct kvm_vcpu *vcpu, unsigned pmc, u64 *data);

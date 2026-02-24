@@ -555,7 +555,7 @@ static int reprogram_counter(struct kvm_pmc *pmc)
 	emulate_overflow = pmc_pause_counter(pmc);
 
 	if (!pmc_is_globally_enabled(pmc) || !pmc_is_locally_enabled(pmc) ||
-	    !pmc_is_event_allowed(pmc))
+	    !pmc_is_event_allowed(pmc) || !pmc_needs_perf_event(pmc))
 		return 0;
 
 	if (emulate_overflow)
