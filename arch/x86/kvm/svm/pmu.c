@@ -20,6 +20,8 @@
 #include "pmu.h"
 #include "svm.h"
 
+#define AMD_MERGE_EVENT	((0xFULL << 32) | 0xFFULL)
+
 enum pmu_type {
 	PMU_TYPE_COUNTER = 0,
 	PMU_TYPE_EVNTSEL,
@@ -125,6 +127,21 @@ static bool amd_is_valid_msr(struct kvm_vcpu *vcpu, u32 msr)
 	return amd_msr_idx_to_pmc(vcpu, msr);
 }
 
+static u64 amd_pmu_get_counter(struct kvm_pmc *pmc)
+{
+	struct kvm_pmu *pmu = pmc_to_pmu(pmc);
+	struct kvm_pmc *even;
+	u64 counter;
+
+	if ((pmc->idx & 0x1) && (pmc->counter_bitmask == U16_MAX)) {
+		even = amd_pmu_get_pmc(pmu, pmc->idx - 1);
+		counter = (pmc_read_counter(even) >> kvm_pmu_cap.bit_width_gp) & pmc->counter_bitmask;
+		pmc_write_counter(pmc, counter);
+	}
+
+	return pmc_read_counter(pmc);
+}
+
 static int amd_pmu_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 {
 	struct kvm_pmu *pmu = vcpu_to_pmu(vcpu);
@@ -134,7 +151,7 @@ static int amd_pmu_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 	/* MSR_PERFCTRn */
 	pmc = get_gp_pmc_amd(pmu, msr, PMU_TYPE_COUNTER);
 	if (pmc) {
-		msr_info->data = pmc_read_counter(pmc);
+		msr_info->data = amd_pmu_get_counter(pmc);
 		return 0;
 	}
 	/* MSR_EVNTSELn */
@@ -147,6 +164,98 @@ static int amd_pmu_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 	return 1;
 }
 
+static void amd_pmu_set_counter(struct kvm_pmc *pmc, u64 data)
+{
+	struct kvm_pmu *pmu = pmc_to_pmu(pmc);
+	struct kvm_pmc *even, *odd;
+	u64 counter;
+
+	if (!(pmc->idx & 0x1) && (pmc->counter_bitmask == U64_MAX)) {
+		odd = amd_pmu_get_pmc(pmu, pmc->idx + 1);
+		counter = data >> kvm_pmu_cap.bit_width_gp;
+		pmc_write_counter(odd, counter);
+	} else if ((pmc->idx & 0x1) && (pmc->counter_bitmask == U16_MAX)) {
+		even = amd_pmu_get_pmc(pmu, pmc->idx - 1);
+		counter = pmc_read_counter(even) & pmu->counter_bitmask[KVM_PMC_GP];
+		counter |= data << kvm_pmu_cap.bit_width_gp;
+		pmc_write_counter(even, counter);
+	}
+
+	pmc_write_counter(pmc, data);
+}
+
+static void amd_pmu_set_eventsel(struct kvm_pmc *pmc, u64 data)
+{
+	u64 event = data & AMD64_EVENTSEL_EVENT;
+	struct kvm_pmu *pmu = pmc_to_pmu(pmc);
+	struct kvm_pmc *even, *odd;
+	u64 counter;
+
+	pmc->eventsel = data;
+	pmc->eventsel_hw = (data & ~AMD64_EVENTSEL_HOSTONLY) |
+			   AMD64_EVENTSEL_GUESTONLY;
+
+	/* PMCx003 (Retired SSE/AVX FLOPs) is the only merge-able event */
+	if (event == 0x3) {
+		/*
+		 * When not an even counter or disabled, operate with default
+		 * width
+		 */
+		if ((pmc->idx & 0x1) || !pmc_is_locally_enabled(pmc))
+			goto done;
+
+		even = pmc;
+		odd = amd_pmu_get_pmc(pmu, pmc->idx + 1);
+
+		/*
+		 * When the odd counter is neither programmed with the Merge
+		 * event nor enabled, operate with default width
+		 */
+		if (((odd->eventsel_hw & AMD64_EVENTSEL_EVENT) != AMD_MERGE_EVENT) ||
+		    !pmc_is_locally_enabled(odd))
+			goto done;
+
+		/*
+		 * When all conditions are met, the even counter operates with
+		 * 64-bit width and the odd counter with 16-bit width
+		 */
+		even->counter_bitmask = U64_MAX;
+		odd->counter_bitmask = U16_MAX;
+
+		/* Extend the value of the even counter */
+		counter = pmc_read_counter(even) & pmu->counter_bitmask[KVM_PMC_GP];
+		counter |= pmc_read_counter(odd) << kvm_pmu_cap.bit_width_gp;
+		pmc_write_counter(even, counter);
+
+		/* Allow the Merge event to be enabled in hardware */
+		if (kvm_vcpu_has_mediated_pmu(pmc->vcpu))
+			odd->eventsel_hw |= ARCH_PERFMON_EVENTSEL_ENABLE;
+		return;
+	} else if (event == AMD_MERGE_EVENT) {
+		/*
+		 * When not an odd counter or when bits that can potentially
+		 * cause undefined behaviour are set, disable the counter
+		 */
+		if (!(pmc->idx & 0x1) ||
+		    !pmc_is_locally_enabled(pmc) ||
+		    (pmc->eventsel ^ (AMD_MERGE_EVENT | ARCH_PERFMON_EVENTSEL_ENABLE))) {
+			pmc->eventsel_hw = 0;
+			goto done;
+		}
+
+		/*
+		 * Defer enabling the counter and clear unnecessary bits to
+		 * avoid any undefined behaviour. Even if this happens to be an
+		 * odd counter, it is unknown if the even counter is going to
+		 * be programmed with a merge-able event.
+		 */
+		pmc->eventsel_hw = AMD_MERGE_EVENT;
+	}
+
+done:
+	pmc->counter_bitmask = pmu->counter_bitmask[KVM_PMC_GP];
+}
+
 static int amd_pmu_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 {
 	struct kvm_pmu *pmu = vcpu_to_pmu(vcpu);
@@ -157,7 +266,7 @@ static int amd_pmu_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 	/* MSR_PERFCTRn */
 	pmc = get_gp_pmc_amd(pmu, msr, PMU_TYPE_COUNTER);
 	if (pmc) {
-		pmc_write_counter(pmc, data);
+		amd_pmu_set_counter(pmc, data);
 		return 0;
 	}
 	/* MSR_EVNTSELn */
@@ -165,9 +274,7 @@ static int amd_pmu_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 	if (pmc) {
 		data &= ~pmu->reserved_bits;
 		if (data != pmc->eventsel) {
-			pmc->eventsel = data;
-			pmc->eventsel_hw = (data & ~AMD64_EVENTSEL_HOSTONLY) |
-					   AMD64_EVENTSEL_GUESTONLY;
+			amd_pmu_set_eventsel(pmc, data);
 			kvm_pmu_request_counter_reprogram(pmc);
 		}
 		return 0;
