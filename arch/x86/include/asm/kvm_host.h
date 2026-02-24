@@ -532,6 +532,7 @@ struct kvm_pmc {
 	 * to the counter.
 	 */
 	u64 counter;
+	u64 counter_bitmask;
 	/*
 	 * PMC events triggered by KVM emulation that haven't been fully
 	 * processed, i.e. haven't undergone overflow detection.

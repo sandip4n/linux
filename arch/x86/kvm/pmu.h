@@ -110,9 +110,7 @@ static inline struct kvm_pmc *kvm_pmc_idx_to_pmc(struct kvm_pmu *pmu, int idx)
 
 static inline u64 pmc_bitmask(struct kvm_pmc *pmc)
 {
-	struct kvm_pmu *pmu = pmc_to_pmu(pmc);
-
-	return pmu->counter_bitmask[pmc->type];
+	return pmc->counter_bitmask;
 }
 
 static inline u64 pmc_read_counter(struct kvm_pmc *pmc)

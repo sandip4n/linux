@@ -81,9 +81,8 @@ static struct kvm_pmc *intel_rdpmc_ecx_to_pmc(struct kvm_vcpu *vcpu,
 {
 	unsigned int type = idx & INTEL_RDPMC_TYPE_MASK;
 	struct kvm_pmu *pmu = vcpu_to_pmu(vcpu);
-	struct kvm_pmc *counters;
+	struct kvm_pmc *counters, *pmc;
 	unsigned int num_counters;
-	u64 bitmask;
 
 	/*
 	 * The encoding of ECX for RDPMC is different for architectural versus
@@ -110,12 +109,10 @@ static struct kvm_pmc *intel_rdpmc_ecx_to_pmc(struct kvm_vcpu *vcpu,
 	case INTEL_RDPMC_FIXED:
 		counters = pmu->fixed_counters;
 		num_counters = pmu->nr_arch_fixed_counters;
-		bitmask = pmu->counter_bitmask[KVM_PMC_FIXED];
 		break;
 	case INTEL_RDPMC_GP:
 		counters = pmu->gp_counters;
 		num_counters = pmu->nr_arch_gp_counters;
-		bitmask = pmu->counter_bitmask[KVM_PMC_GP];
 		break;
 	default:
 		return NULL;
@@ -125,8 +122,9 @@ static struct kvm_pmc *intel_rdpmc_ecx_to_pmc(struct kvm_vcpu *vcpu,
 	if (idx >= num_counters)
 		return NULL;
 
-	*mask &= bitmask;
-	return &counters[array_index_nospec(idx, num_counters)];
+	pmc = &counters[array_index_nospec(idx, num_counters)];
+	*mask &= pmc->counter_bitmask;
+	return pmc;
 }
 
 static inline struct kvm_pmc *get_fw_gp_pmc(struct kvm_pmu *pmu, u32 msr)
@@ -347,14 +345,10 @@ static int intel_pmu_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 	default:
 		if ((pmc = get_gp_pmc(pmu, msr, MSR_IA32_PERFCTR0)) ||
 		    (pmc = get_gp_pmc(pmu, msr, MSR_IA32_PMC0))) {
-			u64 val = pmc_read_counter(pmc);
-			msr_info->data =
-				val & pmu->counter_bitmask[KVM_PMC_GP];
+			msr_info->data = pmc_read_counter(pmc);
 			break;
 		} else if ((pmc = get_fixed_pmc(pmu, msr))) {
-			u64 val = pmc_read_counter(pmc);
-			msr_info->data =
-				val & pmu->counter_bitmask[KVM_PMC_FIXED];
+			msr_info->data = pmc_read_counter(pmc);
 			break;
 		} else if ((pmc = get_gp_pmc(pmu, msr, MSR_P6_EVNTSEL0))) {
 			msr_info->data = pmc->eventsel;
@@ -410,7 +404,7 @@ static int intel_pmu_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 		if ((pmc = get_gp_pmc(pmu, msr, MSR_IA32_PERFCTR0)) ||
 		    (pmc = get_gp_pmc(pmu, msr, MSR_IA32_PMC0))) {
 			if ((msr & MSR_PMC_FULL_WIDTH_BIT) &&
-			    (data & ~pmu->counter_bitmask[KVM_PMC_GP]))
+			    (data & ~pmc->counter_bitmask))
 				return 1;
 
 			if (!msr_info->host_initiated &&
@@ -496,6 +490,7 @@ static void intel_pmu_refresh(struct kvm_vcpu *vcpu)
 	union cpuid10_edx edx;
 	u64 perf_capabilities;
 	u64 counter_rsvd;
+	int i;
 
 	if (!lbr_desc)
 		return;
@@ -526,6 +521,9 @@ static void intel_pmu_refresh(struct kvm_vcpu *vcpu)
 	eax.split.bit_width = min_t(int, eax.split.bit_width,
 				    kvm_pmu_cap.bit_width_gp);
 	pmu->counter_bitmask[KVM_PMC_GP] = BIT_ULL(eax.split.bit_width) - 1;
+	for (i = 0; i < KVM_MAX_NR_INTEL_GP_COUNTERS; i++)
+		pmu->gp_counters[i].counter_bitmask = pmu->counter_bitmask[KVM_PMC_GP];
+
 	eax.split.mask_length = min_t(int, eax.split.mask_length,
 				      kvm_pmu_cap.events_mask_len);
 	pmu->available_event_types = ~entry->ebx & (BIT_ULL(eax.split.mask_length) - 1);
@@ -556,6 +554,8 @@ static void intel_pmu_refresh(struct kvm_vcpu *vcpu)
 	edx.split.bit_width_fixed = min_t(int, edx.split.bit_width_fixed,
 					  kvm_pmu_cap.bit_width_fixed);
 	pmu->counter_bitmask[KVM_PMC_FIXED] = BIT_ULL(edx.split.bit_width_fixed) - 1;
+	for (i = 0; i < KVM_MAX_NR_INTEL_FIXED_COUNTERS; i++)
+		pmu->gp_counters[i].counter_bitmask = pmu->counter_bitmask[KVM_PMC_FIXED];
 
 	intel_pmu_enable_fixed_counter_bits(pmu, INTEL_FIXED_0_KERNEL |
 						 INTEL_FIXED_0_USER |
@@ -603,6 +603,7 @@ static void intel_pmu_init(struct kvm_vcpu *vcpu)
 		pmu->gp_counters[i].vcpu = vcpu;
 		pmu->gp_counters[i].idx = i;
 		pmu->gp_counters[i].current_config = 0;
+		pmu->gp_counters[i].counter_bitmask = 0;
 	}
 
 	for (i = 0; i < KVM_MAX_NR_INTEL_FIXED_COUNTERS; i++) {
@@ -611,6 +612,7 @@ static void intel_pmu_init(struct kvm_vcpu *vcpu)
 		pmu->fixed_counters[i].idx = i + KVM_FIXED_PMC_BASE_IDX;
 		pmu->fixed_counters[i].current_config = 0;
 		pmu->fixed_counters[i].eventsel = intel_get_fixed_pmc_eventsel(i);
+		pmu->fixed_counters[i].counter_bitmask = 0;
 	}
 
 	lbr_desc->records.nr = 0;
